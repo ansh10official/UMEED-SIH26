@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Support Chat — UmeedBot</title>
+<title>AI Support Chat — Umeed</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -167,7 +167,7 @@ a{color:inherit}
   <a href="index.html" class="navbar-brand">
     <i class="fas fa-sun navbar-logo"></i>
     <div>
-      <div class="navbar-title">UmeedBot</div>
+      <div class="navbar-title">Umeed</div>
       <div class="navbar-subtitle">Employee Wellness Assistant</div>
     </div>
   </a>
@@ -257,7 +257,6 @@ BACKEND API
 Do NOT put an API key here. Point this at your own
 backend endpoint, which holds the key server-side.
 */
-const API_URL = "https://sih-kts3.onrender.com/api/chat";
 
 const sendBtn=document.getElementById("send");
 const msgInput=document.getElementById("msg");
@@ -387,43 +386,263 @@ function hideTypingIndicator(){
   typingIndicator.style.display="none";
 }
 
-async function sendMessage(){
-  var text=msgInput.value.trim();
-  if(!text) return;
+/* ==================================================
+   GEMINI API
+   ==================================================
+   Prototype mode: API key is stored in this HTML file.
+   ================================================== */
+const GEMINI_API_KEY = "AQ.Ab8RN6JR8BBK3RbDiIJqTZ92bzgTtHsTtHojUpcgznZRDZZspg";
 
-  addMessage(text, "user");
-  msgInput.value="";
-  msgInput.style.height="auto";
-  sendBtn.disabled=true;
-  showTypingIndicator();
+/*
+   Use stable model IDs instead of gemini-flash-latest.
+   Google currently lists these as stable Gemini Flash models.
+*/
+const GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash"
+];
 
-  try{
-    var response=await fetch(API_URL, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({message:text})
+function sleep(ms){
+    return new Promise(function(resolve){
+        setTimeout(resolve, ms);
     });
+}
 
-    if(!response.ok) throw new Error("Server returned an error");
+async function requestGemini(model, text){
+    const url =
+        "https://generativelanguage.googleapis.com/v1beta/models/" +
+        model +
+        ":generateContent";
 
-    var data=await response.json();
-    hideTypingIndicator();
+    return await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
+        },
+        body: JSON.stringify({
+            systemInstruction: {
+                parts: [
+                    {
+                        text:
+                            "You are Umeed, an empathetic employee wellness support assistant. " +
+                            "Be warm, supportive, concise, and practical. " +
+                            "Listen carefully and respond naturally. " +
+                            "Do not diagnose medical conditions or prescribe medication. " +
+                            "If someone may be in immediate danger, encourage them to contact " +
+                            "appropriate emergency or crisis support."
+                    }
+                ]
+            },
+            contents: [
+                {
+                    role: "user",
+                    parts: [
+                        {
+                            text: text
+                        }
+                    ]
+                }
+            ],
+            generationConfig: {
+                maxOutputTokens: 4096
+            }
+        })
+    });
+}
 
-    if(data.reply){
-      addMessage(data.reply, "bot");
-    }else if(data.error){
-      addMessage("Something went wrong on our end: "+data.error, "bot");
-    }else{
-      addMessage("I didn't get a response that time — could you try sending that again?", "bot");
+async function sendMessage(){
+    var text = msgInput.value.trim();
+    if(!text) return;
+
+    addMessage(text, "user");
+    msgInput.value = "";
+    msgInput.style.height = "auto";
+    sendBtn.disabled = true;
+    showTypingIndicator();
+
+    try {
+        if (
+            !GEMINI_API_KEY ||
+            GEMINI_API_KEY === "PASTE_YOUR_NEW_GEMINI_API_KEY_HERE"
+        ) {
+            throw new Error("API_KEY_NOT_ADDED");
+        }
+
+        var data = null;
+        var lastError = null;
+        var successfulModel = null;
+
+        /*
+          Try each model. For temporary 429/5xx errors,
+          retry with exponential backoff before moving on.
+        */
+        for(var m = 0; m < GEMINI_MODELS.length; m++){
+            var model = GEMINI_MODELS[m];
+
+            for(var attempt = 0; attempt < 3; attempt++){
+                try {
+                    var response = await requestGemini(model, text);
+                    var responseText = await response.text();
+
+                    if(response.ok){
+                        data = JSON.parse(responseText);
+                        successfulModel = model;
+                        break;
+                    }
+
+                    console.error(
+                        "Gemini error",
+                        model,
+                        "HTTP " + response.status,
+                        responseText
+                    );
+
+                    /*
+                      429 = rate limit.
+                      408/5xx = temporary service/network problem.
+                      Retry these; don't waste retries on invalid
+                      keys or malformed requests.
+                    */
+                    if(
+                        response.status === 408 ||
+                        response.status === 429 ||
+                        response.status >= 500
+                    ){
+                        lastError = new Error(
+                            "HTTP " + response.status
+                        );
+
+                        if(attempt < 2){
+                            await sleep(1500 * Math.pow(2, attempt));
+                            continue;
+                        }
+                    } else {
+                        var apiError = "Gemini API request failed.";
+
+                        try {
+                            var errorData = JSON.parse(responseText);
+                            apiError =
+                                errorData?.error?.message || apiError;
+                        } catch(e) {}
+
+                        throw new Error(apiError);
+                    }
+
+                } catch(error) {
+                    lastError = error;
+
+                    if(attempt < 2){
+                        await sleep(1500 * Math.pow(2, attempt));
+                    }
+                }
+            }
+
+            if(data) break;
+        }
+
+        if(!data){
+            throw lastError || new Error("NO_GEMINI_RESPONSE");
+        }
+
+        console.log("Umeed response model:", successfulModel);
+        console.log("Gemini response:", data);
+
+        var candidate = data?.candidates?.[0];
+        var finishReason = candidate?.finishReason;
+
+        /*
+          MAX_TOKENS means Gemini stopped because the output budget
+          was reached. Retry once with a larger budget so the user
+          doesn't receive a cut-off sentence.
+        */
+        if(finishReason === "MAX_TOKENS"){
+            console.warn("Umeed response reached MAX_TOKENS. Retrying with a larger output budget.");
+
+            var retryResponse = await fetch(
+                "https://generativelanguage.googleapis.com/v1beta/models/" +
+                successfulModel +
+                ":generateContent",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": GEMINI_API_KEY
+                    },
+                    body: JSON.stringify({
+                        systemInstruction: {
+                            parts: [{
+                                text:
+                                    "You are Umeed, an empathetic employee wellness support assistant. " +
+                                    "Be warm, supportive, concise, and practical. " +
+                                    "Give complete answers rather than stopping mid-sentence. " +
+                                    "For a short user message, respond naturally with a helpful answer. " +
+                                    "Do not diagnose medical conditions or prescribe medication. " +
+                                    "If someone may be in immediate danger, encourage appropriate emergency or crisis support."
+                            }]
+                        },
+                        contents: [{
+                            role: "user",
+                            parts: [{ text: text }]
+                        }],
+                        generationConfig: {
+                            maxOutputTokens: 8192,
+                            temperature: 0.7
+                        }
+                    })
+                }
+            );
+
+            if(retryResponse.ok){
+                data = await retryResponse.json();
+                candidate = data?.candidates?.[0];
+                finishReason = candidate?.finishReason;
+            }else{
+                console.warn("Umeed larger-output retry failed:", await retryResponse.text());
+            }
+        }
+
+        const reply =
+            data?.candidates?.[0]?.content?.parts
+                ?.map(function(part){
+                    return part.text || "";
+                })
+                .join("")
+                .trim();
+
+        hideTypingIndicator();
+
+        if(reply){
+            addMessage(reply, "bot");
+        }else{
+            console.error("Unexpected Gemini response:", data);
+
+            addMessage(
+                "Umeed AI support failed. Please try again in a moment.",
+                "bot"
+            );
+        }
+
+    } catch(error) {
+        console.error("Umeed AI error:", error);
+        hideTypingIndicator();
+
+        var userMessage;
+
+        if(error.message === "API_KEY_NOT_ADDED"){
+            userMessage =
+                "Umeed AI support failed. Please add your Gemini API key.";
+        }else{
+            userMessage =
+                "Umeed AI support failed. Please try again in a moment.";
+        }
+
+        addMessage(userMessage, "bot");
     }
-  }catch(error){
-    console.error("Chat connection error:", error);
-    hideTypingIndicator();
-    addMessage("I'm having trouble connecting right now. Please check your internet connection or try again in a moment.", "bot");
-  }
 
-  sendBtn.disabled=false;
-  msgInput.focus();
+    sendBtn.disabled = false;
+    msgInput.focus();
 }
 
 msgInput.addEventListener("input", function(){
